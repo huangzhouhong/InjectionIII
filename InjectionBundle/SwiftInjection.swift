@@ -65,7 +65,7 @@ public class SwiftInjection: NSObject {
     public class func inject(oldClass: AnyClass?, classNameOrFile: String) {
         do {
             let tmpfile = try SwiftEval.instance.rebuildClass(oldClass: oldClass,
-                                    classNameOrFile: classNameOrFile, extra: nil)
+                                                              classNameOrFile: classNameOrFile, extra: nil)
             try inject(tmpfile: tmpfile)
         }
         catch {
@@ -82,11 +82,11 @@ public class SwiftInjection: NSObject {
             let execBuild = mtime(Bundle.main.executablePath!)
 
             while true {
-                let tmpfile = "/tmp/eval\(injectionNumber+1)"
+                let tmpfile = "/tmp/eval\(injectionNumber + 1)"
                 if mtime("\(tmpfile).dylib") < execBuild {
                     break
                 }
-                try inject(tmpfile: tmpfile)
+                try self.inject(tmpfile: tmpfile)
                 injectionNumber += 1
             }
         }
@@ -98,10 +98,10 @@ public class SwiftInjection: NSObject {
     @objc
     public class func inject(tmpfile: String) throws {
         let newClasses = try SwiftEval.instance.loadAndInject(tmpfile: tmpfile)
-        let oldClasses = //oldClass != nil ? [oldClass!] :
+        let oldClasses = // oldClass != nil ? [oldClass!] :
             newClasses.map { objc_getClass(class_getName($0)) as! AnyClass }
         var testClasses = [AnyClass]()
-        for i in 0..<oldClasses.count {
+        for i in 0 ..< oldClasses.count {
             let oldClass: AnyClass = oldClasses[i], newClass: AnyClass = newClasses[i]
 
             // old-school swizzle Objective-C class & instance methods
@@ -141,9 +141,9 @@ public class SwiftInjection: NSObject {
 
         // Thanks https://github.com/johnno1962/injectionforxcode/pull/234
         if !testClasses.isEmpty {
-            testQueue.async {
+            self.testQueue.async {
                 testQueue.suspend()
-                let timer = Timer(timeInterval: 0, repeats:false, block: { _ in
+                let timer = Timer(timeInterval: 0, repeats: false, block: { _ in
                     for newClass in testClasses {
                         let suite0 = XCTestSuite(name: "Injected")
                         let suite = XCTestSuite(forTestCaseClass: newClass)
@@ -157,28 +157,64 @@ public class SwiftInjection: NSObject {
             }
         }
         else {
-            let injectedClasses = oldClasses.filter {
-                class_getInstanceMethod($0, #selector(SwiftInjected.injected)) != nil }
-
-            // implement -injected() method using sweep of objects in application
-            if !injectedClasses.isEmpty {
+            #if os(iOS) || os(tvOS)
+            let app = UIApplication.shared
+            #else
+            let app = NSApplication.shared
+            #endif
+            let seeds: [Any] = [app.delegate as Any] + app.windows
+            SwiftSweeper(instanceTask: {
+                (instance: AnyObject) in
                 #if os(iOS) || os(tvOS)
-                let app = UIApplication.shared
-                #else
-                let app = NSApplication.shared
-                #endif
-                let seeds: [Any] =  [app.delegate as Any] + app.windows
-                SwiftSweeper(instanceTask: {
-                    (instance: AnyObject) in
-                    if injectedClasses.contains(where: { $0 == object_getClass(instance) }) {
-                        let proto = unsafeBitCast(instance, to: SwiftInjected.self)
-                        proto.injected?()
-                    }
-                }).sweepValue(seeds)
-            }
+                
+                if let vc = instance as? UIViewController {
+                    if instance is UITabBarController || instance is UINavigationController {
+                        print("ignore vc: \(instance)")
+                    }else if vc.isViewLoaded && vc.view.window != nil {
+                        print("start reload vc: \(vc)")
+                        for subview in vc.view.subviews {
+                            subview.removeFromSuperview()
+                        }
+                        if let sublayers = vc.view.layer.sublayers {
+                            for sublayer in sublayers {
+                                sublayer.removeFromSuperlayer()
+                            }
+                        }
 
-            let notification = Notification.Name("INJECTION_BUNDLE_NOTIFICATION")
-            NotificationCenter.default.post(name: notification, object: oldClasses)
+                        vc.viewDidLoad()
+                        vc.viewWillAppear(false)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            vc.viewDidAppear(false)
+                        }
+                    }
+                    else {
+                        print("ignore vc: \(vc)")
+                    }
+                }
+                #endif
+            }).sweepValue(seeds)
+//            let injectedClasses = oldClasses.filter {
+//                class_getInstanceMethod($0, #selector(SwiftInjected.injected)) != nil }
+            //
+//            // implement -injected() method using sweep of objects in application
+//            if !injectedClasses.isEmpty {
+//                #if os(iOS) || os(tvOS)
+//                let app = UIApplication.shared
+//                #else
+//                let app = NSApplication.shared
+//                #endif
+//                let seeds: [Any] =  [app.delegate as Any] + app.windows
+//                SwiftSweeper(instanceTask: {
+//                    (instance: AnyObject) in
+//                    if injectedClasses.contains(where: { $0 == object_getClass(instance) }) {
+//                        let proto = unsafeBitCast(instance, to: SwiftInjected.self)
+//                        proto.injected?()
+//                    }
+//                }).sweepValue(seeds)
+//            }
+            //
+//            let notification = Notification.Name("INJECTION_BUNDLE_NOTIFICATION")
+//            NotificationCenter.default.post(name: notification, object: oldClasses)
         }
     }
 
@@ -218,44 +254,44 @@ class SwiftSweeper {
                 fallthrough
             case .collection:
                 for (_, child) in mirror.children {
-                    sweepValue(child)
+                    self.sweepValue(child)
                 }
                 return
             case .dictionary:
                 for (_, child) in mirror.children {
                     for (_, element) in Mirror(reflecting: child).children {
-                        sweepValue(element)
+                        self.sweepValue(element)
                     }
                 }
                 return
             case .class:
-                sweepInstance(value as AnyObject)
+                self.sweepInstance(value as AnyObject)
                 return
             case .optional:
                 if let some = mirror.children.first?.value {
-                    sweepValue(some)
+                    self.sweepValue(some)
                 }
                 return
             case .enum:
                 if let evals = mirror.children.first?.value {
-                    sweepValue(evals)
+                    self.sweepValue(evals)
                 }
             case .tuple:
                 fallthrough
             case .struct:
-                sweepMembers(value)
+                self.sweepMembers(value)
             }
         }
     }
 
     func sweepInstance(_ instance: AnyObject) {
         let reference = unsafeBitCast(instance, to: UnsafeRawPointer.self)
-        if seen[reference] == nil {
-            seen[reference] = true
+        if self.seen[reference] == nil {
+            self.seen[reference] = true
 
-            instanceTask(instance)
+            self.instanceTask(instance)
 
-            sweepMembers(instance)
+            self.sweepMembers(instance)
             instance.legacySwiftSweep?()
         }
     }
@@ -264,7 +300,7 @@ class SwiftSweeper {
         var mirror: Mirror? = Mirror(reflecting: instance)
         while mirror != nil {
             for (_, value) in mirror!.children {
-                sweepValue(value)
+                self.sweepValue(value)
             }
             mirror = mirror!.superclassMirror
         }
@@ -294,7 +330,7 @@ extension NSObject {
                                 if let obj = $0.pointee {
                                     SwiftSweeper.current?.sweepInstance(obj)
                                 }
-                        }
+                            }
                     }
                 }
                 free(ivars)
@@ -364,7 +400,7 @@ public struct ClassMetadataSwift {
 
     /// A function for destroying instance variables, used to clean up
     /// after an early return from a constructor.
-    public var IVarDestroyer: SIMP? = nil
+    public var IVarDestroyer: SIMP?
 
     // After this come the class members, laid out as follows:
     //   - class members for the superclass (recursively)
@@ -388,11 +424,11 @@ func _stdlib_demangleImpl(
     outputBuffer: UnsafeMutablePointer<UInt8>?,
     outputBufferSize: UnsafeMutablePointer<UInt>?,
     flags: UInt32
-    ) -> UnsafeMutablePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>?
 
 public func _stdlib_demangleName(_ mangledName: String) -> String {
     return mangledName.utf8CString.withUnsafeBufferPointer {
-        (mangledNameUTF8) in
+        mangledNameUTF8 in
 
         let demangledNamePtr = _stdlib_demangleImpl(
             mangledName: mangledNameUTF8.baseAddress,
